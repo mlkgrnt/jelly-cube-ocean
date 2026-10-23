@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>资产陈列室 · Jelly Cube Ocean Assets</title>
+<link rel="icon" href="../assets/svg/jelly-cube.svg">
+<style>
+  /* 这一页只做陈列用，样式刻意保持极简；真正的成品外壳在 assets/css/jelly-ui.css */
+  :root { --ink: #2c4a52; --accent: #3fcbb0; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden; background: #eaf6ff; color: var(--ink);
+    font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased; transition: color .5s;
+  }
+  canvas { display: block; }
+  .hud {
+    position: fixed; inset: auto auto 22px 22px; z-index: 5;
+    display: flex; flex-direction: column; gap: 10px; pointer-events: none;
+  }
+  .title { font-size: 13px; letter-spacing: .16em; opacity: .72; }
+  .title b { display: block; font-size: 20px; letter-spacing: .02em; opacity: 1; margin-top: 4px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
+  .chip {
+    width: 34px; height: 34px; border-radius: 12px; border: 2px solid rgba(255,255,255,.75);
+    box-shadow: 0 4px 14px rgba(60,120,140,.16); cursor: pointer; padding: 0;
+    transition: transform .28s cubic-bezier(.22,1.16,.36,1), outline-color .2s;
+    outline: 2px solid transparent; outline-offset: 2px;
+  }
+  .chip:hover { transform: translateY(-3px) scale(1.06); }
+  .chip[aria-pressed="true"] { outline-color: var(--ink); }
+  .hint { font-size: 12px; opacity: .55; line-height: 1.7; }
+  .hint code { font-size: 11px; opacity: .85; }
+  .panel {
+    position: fixed; top: 22px; right: 22px; z-index: 5; max-width: 240px;
+    padding: 14px 16px; border-radius: 18px; font-size: 12px; line-height: 1.85;
+    background: rgba(255,255,255,.55); border: 1px solid rgba(255,255,255,.85);
+    box-shadow: 0 10px 34px rgba(70,130,150,.12); backdrop-filter: blur(14px);
+  }
+  .panel b { display: block; font-size: 11px; letter-spacing: .14em; opacity: .6; margin-bottom: 6px; }
+  .panel span { opacity: .75; }
+  @media (max-width: 640px) { .panel { display: none; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three.module.js" } }
+</script>
+</head>
+<body>
+
+<div class="hud">
+  <div class="title">JELLY CUBE OCEAN · ASSETS<b id="paletteName">薄荷汽水</b></div>
+  <div class="chips" id="chips"></div>
+  <div class="hint">不能拖动，这里是静态陈列 · 点果冻会戳一下 · 按 <code>空格</code> 晃一晃</div>
+</div>
+
+<div class="panel">
+  <b>此页用到的资产</b>
+  <span>
+    assets/js/palettes.js<br>
+    assets/js/backdrop.js<br>
+    assets/js/jelly-cube.js<br>
+    assets/js/creatures.js<br>
+    assets/js/bubbles.js<br>
+    assets/js/core.js<br>
+    vendor/three.module.js
+  </span>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { PALETTES, getPalette, SPECIES_META } from '../assets/js/palettes.js';
+import { createBackdropMaterial } from '../assets/js/backdrop.js';
+import { JellyBody, createJellyGeometry } from '../assets/js/jelly-cube.js';
+import { CREATURE_BUILDERS } from '../assets/js/creatures.js';
+import { createBubbleMaterial } from '../assets/js/bubbles.js';
+import { mulberry32, clamp } from '../assets/js/core.js';
+
+const TAU = Math.PI * 2;
+
+// --- 舞台 -------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 120);
+camera.position.set(6.6, 4.0, 8.9);
+
+// 支持 ?palette=sakura 之类的直链，方便做封面图 / 截图对比
+let palette = getPalette(new URLSearchParams(location.search).get('palette') || 'mint');
+
+// 背景：全屏 quad + 同一个 shader 烘进一张小 RT，供果冻折射采样
+const bgMat = createBackdropMaterial({ a: palette.bg[0], b: palette.bg[1], c: palette.bg[2] });
+const bg = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
+bg.frustumCulled = false;
+bg.renderOrder = -100;
+scene.add(bg);
+
+const bgScene = new THREE.Scene();
+const bgCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const bgRTMat = createBackdropMaterial({ a: palette.bg[0], b: palette.bg[1], c: palette.bg[2] });
+const rtQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgRTMat);
+rtQuad.frustumCulled = false;
+bgScene.add(rtQuad);
+const bgRT = new THREE.WebGLRenderTarget(256, 256, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  depthBuffer: false, stencilBuffer: false, generateMipmaps: false,
+});
+
+// 灯光和原版一致：一记环境光 + 主光 / 补光 / 轮廓光
+scene.add(new THREE.HemisphereLight(0xffffff, 0xcfd8ff, 1.5));
+for (const [color, intensity, pos] of [
+  [0xffffff, 2.2, [6, 9, 7]],
+  [0xa9d4ff, 1.2, [-7, 2, -6]],
+  [0xffd9ef, 1.0, [0, -6, 4]],
+]) {
+  const light = new THREE.DirectionalLight(color, intensity);
+  light.position.set(...pos);
+  scene.add(light);
+}
+
+// --- 果冻本体 ---------------------------------------------------------------
+const jelly = new JellyBody(scene, { palette, softness: 0.55, bounce: 0.6, clarity: 0.62 });
+jelly.setBackgroundTexture(bgRT.texture);
+
+// --- 六只小生物 -------------------------------------------------------------
+const creatureRoot = new THREE.Group();
+scene.add(creatureRoot);
+let swimmers = [];
+
+function spawnCreatures() {
+  for (const c of swimmers) {
+    creatureRoot.remove(c);
+    c.traverse((o) => {
+      if (o.isMesh) {
+        o.geometry.dispose();
+        if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+        else o.material.dispose();
+      }
+    });
+  }
+  swimmers = [];
+  const ids = SPECIES_META.map((s) => s.id);
+  ids.forEach((id, i) => {
+    const rng = mulberry32(7919 + i * 131);
+    const group = CREATURE_BUILDERS[id]({
+      palette,
+      rng,
+      tint: new THREE.Color(palette.jelly),
+    });
+    group.userData.phase = rng() * TAU;
+    group.userData.orbit = 0.62 + (i % 3) * 0.22;
+    group.userData.height = -0.45 + (i % 2) * 0.62 + (i === 2 ? 0.35 : 0);
+    group.userData.speed = 0.28 + rng() * 0.12;
+    group.userData.dir = i % 2 ? -1 : 1;
+    group.scale.setScalar(0.46 + rng() * 0.1);
+    creatureRoot.add(group);
+    swimmers.push(group);
+  });
+}
+spawnCreatures();
+
+// 让它们在果冻里慢慢绕圈（原版是 Ocean 类负责这套运动，这里只留最小演示）
+function swim(t, dt) {
+  for (const c of swimmers) {
+    const u = c.userData;
+    const a = u.phase + t * u.speed * u.dir;
+    const r = u.orbit;
+    c.position.set(Math.cos(a) * r, u.height + Math.sin(t * 0.9 + u.phase) * 0.16, Math.sin(a) * r);
+    // 鼻子朝 +Z，所以用切线方向定朝向
+    const vx = -Math.sin(a) * u.dir;
+    const vz = Math.cos(a) * u.dir;
+    c.rotation.y = Math.atan2(vx, vz);
+    c.rotation.z = Math.sin(t * 1.6 + u.phase) * 0.12 * u.dir;
+    if (u.animate) u.animate(t, dt);
+  }
+}
+
+// --- 果冻里的气泡 -----------------------------------------------------------
+const bubbleMat = createBubbleMaterial('#ffffff', '#ffffff', 0.8);
+const bubbleGeo = createJellyGeometry(10, 13, 1);
+const bubbles = [];
+for (let i = 0; i < 9; i++) {
+  const b = new THREE.Mesh(bubbleGeo, bubbleMat);
+  const r = 0.05 + Math.random() * 0.06;
+  b.scale.setScalar(r);
+  b.userData = { x: (Math.random() - 0.5) * 2.2, z: (Math.random() - 0.5) * 2.2, y: (Math.random() - 0.5) * 2.4, v: 0.1 + Math.random() * 0.14 };
+  scene.add(b);
+  bubbles.push(b);
+}
+
+// --- 交互 -------------------------------------------------------------------
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let pointerDown = null;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  pointerDown = { x: e.clientX, y: e.clientY };
+  pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  const hit = jelly.pick(raycaster);
+  if (hit) jelly.poke(hit.local, hit.worldNormal, 1);
+});
+addEventListener('pointerup', () => (pointerDown = null));
+
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    jelly.shake(1);
+  }
+});
+
+// 鼠标带一点点视差，别让画面太死
+let parallax = { x: 0, y: 0, tx: 0, ty: 0 };
+addEventListener('pointermove', (e) => {
+  parallax.tx = (e.clientX / innerWidth - 0.5) * 0.5;
+  parallax.ty = (e.clientY / innerHeight - 0.5) * 0.3;
+});
+
+// --- 配色切换 ---------------------------------------------------------------
+const chips = document.getElementById('chips');
+const nameEl = document.getElementById('paletteName');
+nameEl.textContent = palette.name;
+document.documentElement.style.setProperty('--ink', palette.ink);
+document.documentElement.style.setProperty('--accent', palette.accent);
+
+function applyPalette(p) {
+  palette = p;
+  jelly.setPalette(p);
+  for (const m of [bgMat, bgRTMat]) {
+    m.uniforms.uA.value.set(p.bg[0]);
+    m.uniforms.uB.value.set(p.bg[1]);
+    m.uniforms.uC.value.set(p.bg[2]);
+  }
+  document.documentElement.style.setProperty('--ink', p.ink);
+  document.documentElement.style.setProperty('--accent', p.accent);
+  nameEl.textContent = p.name;
+  spawnCreatures();
+  jelly.shake(0.6);
+  for (const b of chips.children) b.setAttribute('aria-pressed', String(b.dataset.id === p.id));
+}
+
+for (const p of PALETTES) {
+  const b = document.createElement('button');
+  b.className = 'chip';
+  b.dataset.id = p.id;
+  b.title = p.name;
+  b.style.background = `linear-gradient(140deg, ${p.jelly}, ${p.accent})`;
+  b.setAttribute('aria-pressed', String(p.id === palette.id));
+  b.addEventListener('click', () => applyPalette(p));
+  chips.appendChild(b);
+}
+
+// --- 尺寸 / 主循环 ----------------------------------------------------------
+function resize() {
+  const w = innerWidth;
+  const h = innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  jelly.setResolution(w * renderer.getPixelRatio(), h * renderer.getPixelRatio());
+  bgRT.setSize(256, 256);
+}
+
+addEventListener('resize', resize);
+resize();
+
+const clock = new THREE.Clock();
+let t = 0;
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  t += dt;
+
+  bgMat.uniforms.uRes.value.set(innerWidth, innerHeight);
+  bgMat.uniforms.uTime.value = t;
+  bgRTMat.uniforms.uRes.value.set(1, 1);
+  bgRTMat.uniforms.uTime.value = t;
+  // 把背景烘进小 RT —— 果冻靠它做折射
+  renderer.setRenderTarget(bgRT);
+  renderer.render(bgScene, bgCam);
+  renderer.setRenderTarget(null);
+
+  jelly.update(dt, t);
+
+  swim(t, dt);
+  for (const b of bubbles) {
+    b.userData.y += b.userData.v * dt;
+    if (b.userData.y > 1.5) b.userData.y = -1.5;
+    b.position.set(b.userData.x, b.userData.y, b.userData.z);
+    b.rotation.y += dt * 0.6;
+  }
+  bubbleMat.uniforms.uTime.value = t;
+
+  parallax.x += (parallax.tx - parallax.x) * 0.06;
+  parallax.y += (parallax.ty - parallax.y) * 0.06;
+  camera.position.set(6.6 + parallax.x * 1.7, 4.0 - parallax.y * 1.3, 8.9);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld();
+
+  jelly.updateCamera(camera);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
