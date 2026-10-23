@@ -4,6 +4,8 @@
 
 ![预览](demo/preview.png)
 
+**在线**：[资产陈列室](https://mlkgrnt.github.io/jelly-cube-ocean/demo/) · [单文件版](https://mlkgrnt.github.io/jelly-cube-ocean/jelly-cube-ocean.html)
+
 ## 两种打开方式
 
 **① 单文件版**（零依赖，双击就玩）
